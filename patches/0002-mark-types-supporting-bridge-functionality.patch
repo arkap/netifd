@@ -1,0 +1,28 @@
+--- a/device.h
++++ b/device.h
+@@ -60,6 +60,9 @@ struct device_type {
+ 	struct list_head list;
+ 	const char *name;
+ 
++	bool bridge_support;
++	const char * name_prefix;
++
+ 	const struct uci_blob_param_list *config_params;
+ 
+ 	struct device *(*create)(const char *name, struct device_type *devtype,
+--- a/bridge.c
++++ b/bridge.c
+@@ -81,9 +81,12 @@ enum dev_change_type
+ bridge_reload(struct device *dev, struct blob_attr *attr);
+ 
+ struct device_type bridge_device_type = {
+-	.name = "Bridge",
++	.name = "bridge",
+ 	.config_params = &bridge_attr_list,
+ 
++	.bridge_support = true,
++	.name_prefix = "br",
++
+ 	.create = bridge_create,
+ 	.config_init = bridge_config_init,
+ 	.reload = bridge_reload,

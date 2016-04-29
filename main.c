@@ -26,6 +26,7 @@
 #include "interface.h"
 #include "wireless.h"
 #include "proto.h"
+#include "ubusdev.h"
 
 unsigned int debug_mask = 0;
 const char *main_path = DEFAULT_MAIN_PATH;
@@ -325,6 +326,7 @@ int main(int argc, char **argv)
 	}
 
 	proto_shell_init();
+	ubusdev_init();
 	wireless_init();
 
 	if (system_init()) {

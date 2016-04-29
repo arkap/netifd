@@ -18,6 +18,8 @@ extern struct ubus_context *ubus_ctx;
 
 int netifd_ubus_init(const char *path);
 void netifd_ubus_done(void);
+void netifd_add_object(struct ubus_object *obj);
+int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg);
 void netifd_ubus_add_interface(struct interface *iface);
 void netifd_ubus_remove_interface(struct interface *iface);
 void netifd_ubus_interface_event(struct interface *iface, bool up);

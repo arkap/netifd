@@ -1,0 +1,483 @@
+--- a/handler.c
++++ b/handler.c
+@@ -180,6 +180,7 @@ netifd_parse_ubusdev_handler(const char
+ 			tok = json_tokener_new();
+ 
+ 		obj = json_tokener_parse_ex(tok, start, len);
++
+ 		if (!is_error(obj)) {
+ 			netifd_init_ubusdev_handler(path_to_file, obj, cb);
+ 			json_object_put(obj);
+@@ -327,6 +328,7 @@ netifd_handler_parse_config(struct uci_b
+ 	return str_buf;
+ 
+ error:
++	netifd_log_message(L_DEBUG, "error parsing config!\n");
+ 	free(attrs);
+ 	if (validate)
+ 		free(validate);
+--- a/config.c
++++ b/config.c
+@@ -65,6 +65,7 @@ config_parse_bridge_interface(struct uci
+ 
+ 	uci_to_blob(&b, s, devtype->config_params);
+ 	if (!device_create(name, devtype, b.head)) {
++		netifd_log_message(L_DEBUG, "Failed to create bridge of type '%s' for interface '%s'\n", devtype->name, s->e.name);
+ 		D(INTERFACE, "Failed to create bridge for interface '%s'\n", s->e.name);
+ 		return -EINVAL;
+ 	}
+@@ -78,6 +79,8 @@ config_parse_bridge_interface(struct uci
+ static void
+ config_parse_interface(struct uci_section *s, bool alias)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	struct interface *iface;
+ 	const char *type = NULL, *disabled;
+ 	struct blob_attr *config;
+@@ -166,6 +169,8 @@ config_init_devices(void)
+ {
+ 	struct uci_element *e;
+ 
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	uci_foreach_element(&uci_network->sections, e) {
+ 		const struct uci_blob_param_list *params = NULL;
+ 		struct uci_section *s = uci_to_section(e);
+@@ -192,6 +197,8 @@ config_init_devices(void)
+ 		blob_buf_init(&b, 0);
+ 		uci_to_blob(&b, s, params);
+ 		if (devtype) {
++			netifd_log_message(L_DEBUG, "creating '%s' of type '%s' with %s params\n",
++				name, devtype->name, params == simple_device_type.config_params ? "SIMPLE DEVICE" : devtype->name);
+ 			dev = device_create(name, devtype, b.head);
+ 			if (!dev)
+ 				continue;
+@@ -239,6 +246,7 @@ config_init_package(const char *config)
+ static void
+ config_init_interfaces(void)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
+ 	struct uci_element *e;
+ 
+ 	uci_foreach_element(&uci_network->sections, e) {
+--- a/interface.c
++++ b/interface.c
+@@ -287,8 +287,10 @@ __interface_set_down(struct interface *i
+ 		break;
+ 
+ 	case IFS_DOWN:
+-		if (iface->main_dev.dev)
++		if (iface->main_dev.dev) {
++			netifd_log_message(L_DEBUG, "interface '%s' releasing device '%s' in %s\n", iface->name, iface->main_dev.dev->ifname, __func__);
+ 			device_release(&iface->main_dev);
++		}
+ 	case IFS_TEARDOWN:
+ 	default:
+ 		break;
+@@ -852,6 +854,8 @@ void interface_set_dynamic(struct interf
+ 
+ static bool __interface_add(struct interface *iface, struct blob_attr *config, bool alias)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s, (iface->name=%s, config=%p, alias=%d)\n", __func__, iface->name, iface->ifname, config, alias);
++
+ 	struct blob_attr *tb[IFACE_ATTR_MAX];
+ 	struct blob_attr *cur;
+ 
+@@ -877,12 +881,14 @@ static bool __interface_add(struct inter
+ void
+ interface_add(struct interface *iface, struct blob_attr *config)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (iface->name=%s, config=%p)\n", __func__, iface->name, iface->ifname, config);
+ 	__interface_add(iface, config, false);
+ }
+ 
+ bool
+ interface_add_alias(struct interface *iface, struct blob_attr *config)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (iface->name=%s, config=%p)\n", __func__, iface->name, config);
+ 	if (iface->proto_handler->flags & PROTO_FLAG_NODEV)
+ 		return false;
+ 
+@@ -1016,6 +1022,8 @@ out:
+ int
+ interface_set_up(struct interface *iface)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (iface->name=%s, iface->main_dev.dev->ifname=%s)\n", __func__, iface->name, iface->main_dev.dev->ifname);
++
+ 	int ret;
+ 
+ 	iface->autostart = true;
+--- a/ubus.c
++++ b/ubus.c
+@@ -1155,12 +1155,14 @@ int netifd_ubusdev_invoke(uint32_t dest_
+ 
+ static void ubusdev_data_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (type=%d)\n", __func__, type);
+ 	// TODO: parse message in case of error and clean up
+ 	return;
+ }
+ 
+ int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (method=%s)\n", __func__, method);
+ 	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, ubusdev_data_cb, NULL, 3000);
+ }
+ 
+--- a/bridge.c
++++ b/bridge.c
+@@ -292,6 +292,7 @@ bridge_check_retry(struct bridge_state *
+ static void
+ bridge_member_cb(struct device_user *dev, enum device_event ev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (ifname='%s')\n", __func__, dev->dev->ifname);
+ 	struct bridge_member *bm = container_of(dev, struct bridge_member, dev);
+ 	struct bridge_state *bst = bm->bst;
+ 
+@@ -348,6 +349,7 @@ bridge_set_down(struct bridge_state *bst
+ static int
+ bridge_set_up(struct bridge_state *bst)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (n_present=%d, force_active=%d)\n", __func__, bst->n_present, bst->force_active);
+ 	struct bridge_member *bm;
+ 	int ret;
+ 
+@@ -383,6 +385,7 @@ bridge_set_up(struct bridge_state *bst)
+ static int
+ bridge_set_state(struct device *dev, bool up)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
+ 	struct bridge_state *bst;
+ 
+ 	bst = container_of(dev, struct bridge_state, dev);
+@@ -396,6 +399,7 @@ bridge_set_state(struct device *dev, boo
+ static struct bridge_member *
+ bridge_create_member(struct bridge_state *bst, struct device *dev, bool hotplug)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (bridge='%s', member='%s')\n", __func__, bst->dev.ifname, dev->ifname);
+ 	struct bridge_member *bm;
+ 
+ 	bm = calloc(1, sizeof(*bm) + strlen(dev->ifname) + 1);
+@@ -449,6 +453,7 @@ bridge_member_update(struct vlist_tree *
+ static void
+ bridge_add_member(struct bridge_state *bst, const char *name)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (name='%s')\n", __func__, name);
+ 	struct device *dev;
+ 
+ 	dev = device_get(name, true);
+@@ -708,6 +713,8 @@ static struct device *
+ bridge_create(const char *name, struct device_type *devtype,
+ 	struct blob_attr *attr)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	struct bridge_state *bst;
+ 	struct device *dev = NULL;
+ 
+--- a/system-linux.c
++++ b/system-linux.c
+@@ -1334,6 +1334,8 @@ system_if_apply_settings(struct device *
+ 
+ int system_if_up(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s')\n", __func__, dev->ifname);
++
+ 	system_if_get_settings(dev, &dev->orig_settings);
+ 	/* Only keep orig settings based on what needs to be set */
+ 	dev->orig_settings.valid_flags = dev->orig_settings.flags;
+@@ -1344,6 +1346,8 @@ int system_if_up(struct device *dev)
+ 
+ int system_if_down(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s')\n", __func__, dev->ifname);
++
+ 	int ret = system_if_flags(dev->ifname, 0, IFF_UP);
+ 	system_if_apply_settings(dev, &dev->orig_settings, dev->orig_settings.flags);
+ 	return ret;
+@@ -1365,9 +1369,13 @@ static int cb_if_check_valid(struct nl_m
+ 	struct ifinfomsg *ifi = NLMSG_DATA(nh);
+ 	struct if_check_data *chk = (struct if_check_data *)arg;
+ 
++	netifd_log_message(L_DEBUG, "NL message type: %d\n", nh->nlmsg_type);
++
+ 	if (nh->nlmsg_type != RTM_NEWLINK)
+ 		return NL_SKIP;
+ 
++	netifd_log_message(L_DEBUG, " '%s' setting '%s' present state to %d\n", __func__, chk->dev->ifname, ifi->ifi_index > 0);
++
+ 	device_set_present(chk->dev, ifi->ifi_index > 0 ? true : false);
+ 	device_set_link(chk->dev, ifi->ifi_flags & IFF_LOWER_UP ? true : false);
+ 
+@@ -1383,6 +1391,8 @@ static int cb_if_check_ack(struct nl_msg
+ 
+ static int cb_if_check_error(struct sockaddr_nl *nla, struct nlmsgerr *err, void *arg)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	struct if_check_data *chk = (struct if_check_data *)arg;
+ 
+ 	device_set_present(chk->dev, false);
+@@ -1394,6 +1404,8 @@ static int cb_if_check_error(struct sock
+ 
+ int system_if_check(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev='%s')\n", __func__, dev->ifname);
++
+ 	struct nl_cb *cb = nl_cb_alloc(NL_CB_DEFAULT);
+ 	struct nl_msg *msg;
+ 	struct ifinfomsg ifi = {
+--- a/ubusdev.c
++++ b/ubusdev.c
+@@ -92,7 +92,7 @@ static const char *__ubusdev_methods[__U
+ 	[UBUSDEV_METHOD_DUMP_INFO] = "dump_info",
+ 	[UBUSDEV_METHOD_DUMP_STATS] = "dump_stats",
+ 	[UBUSDEV_METHOD_CHECK_STATE] = "check_state",
+-	[UBUSDEV_METHOD_DELETE] = "free"
++	[UBUSDEV_METHOD_DELETE] = "free",
+ 
+ 	// hotplug ops
+ 	[UBUSDEV_METHOD_HOTPLUG_ADD] = "add",
+@@ -146,6 +146,7 @@ ubusdev_lookup_id(struct ubusdev_type *d
+ static int
+ ubusdev_hotplug_add(struct device *dev, struct device *member)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (bridge='%s', member='%s')\n", __func__, dev->ifname, member->ifname);
+ 	int ret = 0;
+ 	struct ubusdev_type *utype = container_of(dev->type, struct ubusdev_type,
+ 		handler);
+@@ -171,6 +172,8 @@ ubusdev_hotplug_add(struct device *dev,
+ static int
+ ubusdev_hotplug_del(struct device *dev, struct device *member)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev=%s, member=%s)\n", __func__, dev->ifname, member->ifname);
++	netifd_log_message(L_DEBUG, "call :: %s (dev=%s, member=%s)\n", __func__, dev->ifname, member->ifname);
+ 	// TODO
+ 	return 0;
+ }
+@@ -178,6 +181,7 @@ ubusdev_hotplug_del(struct device *dev,
+ static int
+ ubusdev_hotplug_prepare(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev=%s)\n", __func__, dev->ifname);
+  	// TODO
+ 	return 0;
+ }
+@@ -191,12 +195,16 @@ static const struct device_hotplug_ops u
+ static int
+ ubusdev_bridge_enable_member(struct ubusdev_bridge_member *member)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	int ret;
+ 	struct ubusdev_bridge *ubr = member->parent_br;
+ 
+ 	if (!member->present)
+ 		return 0;
+ 
++	netifd_log_message(L_DEBUG, "member '%s' claiming device '%s'\n", member->name, member->dev_usr.dev->ifname);
++
+ 	ret = device_claim(&member->dev_usr);
+ 	if (ret < 0)
+ 		goto error;
+@@ -218,6 +226,8 @@ error:
+ static int
+ ubusdev_bridge_set_down(struct ubusdev_bridge *ubr)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	// TODO
+ 	return 0;
+ }
+@@ -225,9 +235,13 @@ ubusdev_bridge_set_down(struct ubusdev_b
+ static int
+ ubusdev_bridge_set_up(struct ubusdev_bridge *ubr)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s')\n", __func__, ubr->dev.ifname);
++
+ 	int ret;
+ 	struct ubusdev_bridge_member *member;
+ 
++	netifd_log_message(L_DEBUG, "present: %d, force_active: %d\n", ubr->n_present, ubr->force_active);
++
+ 	if (!ubr->n_present)
+ 		if (!ubr->force_active)
+ 			return -ENOENT;
+@@ -238,6 +252,8 @@ ubusdev_bridge_set_up(struct ubusdev_bri
+ 	// TODO: need retry?
+ 
+ 	if (!ubr->force_active && !ubr->n_present) {
++		netifd_log_message(L_DEBUG, "init of all members for bridge '%s' failed\n", ubr->dev.ifname);
++
+ 		// initialization of all member interfaces failed
+ 		device_set_present(&ubr->dev, false);
+ 		return -ENOENT;
+@@ -270,6 +286,8 @@ ubusdev_bridge_set_state(struct device *
+ static int
+ ubusdev_bridge_disable_member(struct ubusdev_bridge_member *member)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (member='%s')\n", __func__, member->dev_usr.dev->ifname);
++
+ 	if (!member->present)
+ 		return 0;
+ 
+@@ -281,6 +299,8 @@ ubusdev_bridge_disable_member(struct ubu
+ static void
+ ubusdev_bridge_remove_member(struct ubusdev_bridge_member *member)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (member='%s')\n", __func__, member->dev_usr.dev->ifname);
++
+ 	struct ubusdev_bridge *ubr = member->parent_br;
+ 
+ 	if (!member->present)
+@@ -303,6 +323,8 @@ ubusdev_bridge_member_cb(struct device_u
+ 	struct ubusdev_bridge_member *member = container_of(usr, struct ubusdev_bridge_member, dev_usr);
+ 	struct ubusdev_bridge *ubr = member->parent_br;
+ 
++	netifd_log_message(L_DEBUG, "call :: %s (name='%s', event=%d)\n", __func__, member->name, event);
++
+ 	switch (event) {
+ 	case DEV_EVENT_ADD:
+ 		member->present = true;
+@@ -336,6 +358,8 @@ static struct ubusdev_bridge_member *
+ ubusdev_bridge_create_member(struct ubusdev_bridge *ubr, struct device *dev,
+ 	bool hotplug)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (ubr->dev.ifname='%s', dev->ifname='%s')\n", __func__, ubr->dev.ifname, dev->ifname);
++
+ 	struct ubusdev_bridge_member *member;
+ 	char *name;
+ 
+@@ -378,6 +402,8 @@ ubusdev_bridge_add_member(struct ubusdev
+ static void
+ ubusdev_bridge_free_member(struct ubusdev_bridge_member *member)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (member='%s')\n", __func__, member->dev_usr.dev->ifname);
++
+ 	struct device *dev = member->dev_usr.dev;
+ 
+ 	ubusdev_bridge_remove_member(member);
+@@ -403,6 +429,8 @@ static void
+ ubusdev_bridge_member_update(struct vlist_tree *tree,
+ 	struct vlist_node *node_new, struct vlist_node *node_old)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	struct ubusdev_bridge_member *member;
+ 	struct device *dev;
+ 
+@@ -443,6 +471,8 @@ static struct blobmsg_policy ubusdev_bri
+ static struct device*
+ _ubusdev_bridge_create(struct blob_attr *config)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
++
+ 	struct blob_attr *tb[__UBUSDEV_BRIDGE_MAX];
+ 	struct ubusdev_bridge *ubr;
+ 
+@@ -485,6 +515,8 @@ static struct device *
+ ubusdev_create(const char *name, struct device_type *devtype,
+ 	struct blob_attr *config)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (name=%s, devtype=%s)\n", __func__, name, devtype->name);
++
+ 	struct device *dev;
+ 	struct ubusdev_type *utype;
+ 	int ret;
+@@ -545,6 +577,8 @@ error:
+ static void
+ _ubusdev_free_local(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s')\n", __func__, dev->ifname);
++
+ 	struct ubusdev_bridge *ubr;
+ 
+ 	// if device is a bridge take care of the wrapper
+@@ -566,6 +600,8 @@ _ubusdev_free_local(struct device *dev)
+ static void
+ ubusdev_free(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s')\n", __func__, dev->ifname);
++
+ 	struct ubusdev_type *utype;
+ 	int ret;
+ 
+@@ -614,6 +650,8 @@ _ubusdev_bridge_config_init(struct devic
+ static void
+ ubusdev_config_init(struct device *dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s', bridge=%d)\n", __func__, dev->ifname, dev->type->bridge_support);
++
+ 	if (dev->type->bridge_support)
+ 		_ubusdev_bridge_config_init(dev);
+ 	else
+@@ -623,6 +661,7 @@ ubusdev_config_init(struct device *dev)
+ static enum dev_change_type
+ ubusdev_reload(struct device *dev, struct blob_attr *config)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (dev->ifname='%s')\n", __func__, dev->ifname);
+ 	// TODO: compare configs and if different:
+ 	// 1. set device not present
+ 	// 2. contact external device handler
+@@ -640,6 +679,8 @@ ubusdev_handle_create_notify(const char
+ 	struct device *dev;
+ 
+ 	for (i = 0, cur = devices[i]; i < n_devices; cur = devices[++i]) {
++		netifd_log_message(L_DEBUG, "handling create notification for device '%s'\n", cur);
++
+ 		dev = device_get(cur, 0);
+ 		if (!dev)
+ 			continue;
+@@ -653,6 +694,7 @@ ubusdev_handle_create_notify(const char
+ static int
+ ubusdev_handle_update_notify(const char **devices, int n_dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s\n", __func__);
+ 	// TODO
+ 	return 0;
+ }
+@@ -665,6 +707,7 @@ ubusdev_handle_delete_notify(const char
+ 	struct device *dev;
+ 
+ 	for (i = 0, cur = devices[i]; i < n_dev; cur = devices[++i]) {
++		netifd_log_message(L_DEBUG, "handling 'delete' notification for device '%s'\n", cur);
+ 
+ 		dev = device_get(cur, 0);
+ 		if (!dev)
+@@ -678,6 +721,8 @@ ubusdev_handle_delete_notify(const char
+ static int
+ ubusdev_handle_hotplug_add_notify(const char **devices, int n_dev)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s (n_dev=%d)\n", __func__, n_dev);
++
+ 	struct device *bridge, *member;
+ 	struct ubusdev_bridge *ubr;
+ 
+@@ -697,6 +742,7 @@ ubusdev_handle_hotplug_add_notify(const
+ 	return 0;
+ 
+ error:
++	netifd_log_message(L_DEBUG, "an error occurred in %s\n", __func__);
+ 	// TODO: cleanup
+ 	return -1;
+ }
+@@ -765,6 +811,8 @@ static void
+ ubusdev_handle_remove(struct ubus_context *ctx, struct ubus_subscriber *obj,
+ 	uint32_t id)
+ {
++	netifd_log_message(L_DEBUG, "call :: %s, (id=%d)", __func__, id);
++
+ 	struct ubusdev_type *utype;
+ 	utype = container_of(obj, struct ubusdev_type, ubus_sub);
+ 
+@@ -838,6 +886,9 @@ ubusdev_add_devtype(const char *cfg_file
+ 	else
+ 		utype->subscribed = true;
+ 
++	if (!ret)
++		netifd_log_message(L_DEBUG, "subscribed to ubus object '%s' at %08x\n", utype->ubus_sub.obj.name, utype->ubus_peer_id);
++
+ 	// parse and store config format description
+ 	cfg = json_get_field(obj, "config", json_type_array);
+ 	if (!cfg)

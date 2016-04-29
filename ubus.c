@@ -988,14 +988,6 @@ static struct ubus_object iface_object = {
 	.n_methods = ARRAY_SIZE(iface_object_methods),
 };
 
-static void netifd_add_object(struct ubus_object *obj)
-{
-	int ret = ubus_add_object(ubus_ctx, obj);
-
-	if (ret != 0)
-		fprintf(stderr, "Failed to publish object '%s': %s\n", obj->name, ubus_strerror(ret));
-}
-
 static const struct blobmsg_policy iface_policy = {
 	.name = "interface",
 	.type = BLOBMSG_TYPE_STRING,
@@ -1204,6 +1196,51 @@ static struct ubus_object wireless_object = {
 	.methods = wireless_object_methods,
 	.n_methods = ARRAY_SIZE(wireless_object_methods),
 };
+
+/*
+static void ubusdev_req_complete_cb(struct ubus_request *req, int ret)
+{
+	// TODO
+	return;
+}
+
+int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg)
+{
+	int ret;
+	struct ubus_request *req = calloc(1, sizeof(struct ubus_request));
+	if (!req)
+		return -ENOMEM;
+
+	req->data_cb = ubusdev_data_cb;
+	req->complete_cb = ubusdev_req_complete_cb;
+
+	ret = ubus_invoke_async(ubus_ctx, dest_ubus_id, method, msg, req);
+	if (ret)
+		return ret;
+	ubus_complete_request_async(ubus_ctx, req);
+	return 0;
+}*/
+
+static void ubusdev_data_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	netifd_log_message(L_DEBUG, "call :: %s (type=%d)\n", __func__, type);
+	// TODO: parse message in case of error and clean up
+	return;
+}
+
+int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg)
+{
+	netifd_log_message(L_DEBUG, "call :: %s (method=%s)\n", __func__, method);
+	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, ubusdev_data_cb, NULL, 3000);
+}
+
+void netifd_add_object(struct ubus_object *obj)
+{
+	int ret = ubus_add_object(ubus_ctx, obj);
+
+	if (ret != 0)
+		fprintf(stderr, "Failed to publish object '%s': %s\n", obj->name, ubus_strerror(ret));
+}
 
 int
 netifd_ubus_init(const char *path)
