@@ -79,6 +79,38 @@ netifd_init_script_handler(const char *script, json_object *obj, script_dump_cb 
 }
 
 static void
+netifd_init_ubusdev_handler(const char *config_file, json_object *obj,
+	ubusdev_cfg_parse_cb cb)
+{
+	json_object *tmp;
+	const char *name, *br_prefix = NULL;
+	bool bridge_support = true;
+
+	if (!json_check_type(obj, json_type_object))
+		return;
+
+	tmp = json_get_field(obj, "name", json_type_string);
+	if (!tmp)
+ 		return;
+
+	name = json_object_get_string(tmp);
+
+	tmp = json_get_field(obj, "bridge", json_type_string);
+	if (!tmp || !strcmp(json_object_get_string(tmp), "0"))
+ 		bridge_support = false;
+
+	if (bridge_support) {
+		tmp = json_get_field(obj, "br-prefix", json_type_string);
+		if (!tmp)
+			br_prefix = name;
+		else
+			br_prefix = json_object_get_string(tmp);
+	}
+
+	cb(config_file, name, bridge_support, br_prefix, obj);
+}
+
+static void
 netifd_parse_script_handler(const char *name, script_dump_cb cb)
 {
 	struct json_tokener *tok = NULL;
@@ -123,6 +155,82 @@ netifd_parse_script_handler(const char *name, script_dump_cb cb)
 		json_tokener_free(tok);
 
 	pclose(f);
+}
+
+static void
+netifd_parse_ubusdev_handler(const char *path_to_file, ubusdev_cfg_parse_cb cb)
+{
+	struct json_tokener *tok = NULL;
+	json_object *obj;
+	FILE *file;
+	int len;
+	char buf[512], *start;
+
+	file = fopen(path_to_file, "r");
+	if (!file)
+		return;
+
+	do {
+		start = fgets(buf, sizeof(buf), file);
+		if (!start)
+			continue;
+
+		len = strlen(start);
+
+		if (!tok)
+			tok = json_tokener_new();
+
+		obj = json_tokener_parse_ex(tok, start, len);
+
+		if (!is_error(obj)) {
+			netifd_init_ubusdev_handler(path_to_file, obj, cb);
+			json_object_put(obj);
+			json_tokener_free(tok);
+			tok = NULL;
+		} else if (start[len - 1] == '\n') {
+			json_tokener_free(tok);
+			tok = NULL;
+		}
+	} while (!feof(file) && !ferror(file));
+
+	if (tok)
+		json_tokener_free(tok);
+/*
+	// read file content stripping out newlines
+	while ((c = fgetc(file)) != EOF) {
+		if (c == '\n')
+			continue;
+
+		buf[len++] = c;
+
+		// grow buffer (exponentially), if needed
+		if (len == ARRAY_SIZE(buf) - 1) {
+			char *tmp = _grow_buffer(buf, len, len * 2);
+			if (!tmp) {
+				fprintf(stderr,
+					"Error allocating memory for parsing of file '%s'\n",
+					path_to_file);
+				goto free_buf;
+			}
+
+			free(buf);
+			buf = tmp;
+		}
+	}
+	buf[len] = '\0';
+
+	obj = json_tokener_parse_ex(tok, buf, len);
+
+	if (!is_error(obj)) {
+		netifd_init_ubusdev_handler(path_to_file, obj, cb);
+		json_object_put(obj);
+		json_tokener_free(tok);
+	}
+
+free_buf:
+	free(buf);
+*/
+	fclose(file);
 }
 
 void netifd_init_script_handlers(int dir_fd, script_dump_cb cb)
