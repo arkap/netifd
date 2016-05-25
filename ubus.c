@@ -1223,14 +1223,12 @@ int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob
 
 static void ubusdev_data_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 {
-	netifd_log_message(L_DEBUG, "call :: %s (type=%d)\n", __func__, type);
 	// TODO: parse message in case of error and clean up
 	return;
 }
 
 int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg)
 {
-	netifd_log_message(L_DEBUG, "call :: %s (method=%s)\n", __func__, method);
 	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, ubusdev_data_cb, NULL, 3000);
 }
 

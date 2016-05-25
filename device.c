@@ -90,10 +90,14 @@ struct device_type *
 device_type_get(const char *tname)
 {
 	struct device_type *cur;
-
-	list_for_each_entry(cur, &devtypes, list)
-		if (!strcmp(cur->name, tname))
-			return cur;
+	list_for_each_entry(cur, &devtypes, list) {
+		if (!strcmp(cur->name, tname)) {
+			if (bridge)
+				return cur->bridge_support ? cur : NULL;
+			else
+				return cur;
+		}
+	}
 
 	return NULL;
 }
