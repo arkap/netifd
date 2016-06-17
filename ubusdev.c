@@ -19,10 +19,10 @@
 #include "netifd.h"
 #include "handler.h"
 #include "device.h"
-#include "utils.h"
 #include "ubus.h"
 #include "ubusdev.h"
 #include "interface.h"
+#include "system.h"
 
 #define UBUSDEV_UBUSOBJ_NAME_PREFIX "network.device.ubus."
 
@@ -30,31 +30,39 @@ extern struct ubus_context *ubus_ctx;
 static struct blob_buf blob_buffer;
 static int confdir_fd = -1;
 
-enum ext_device_handler_sync_status {
+enum external_sync_state {
 	// device handler interface
-	EXT_DEV_HANDLER_SYNC_OK,
-	EXT_DEV_HANDLER_SYNC_PENDING_CREATE,
-	EXT_DEV_HANDLER_SYNC_PENDING_RELOAD,
-	EXT_DEV_HANDLER_SYNC_PENDING_DELETE,
-	EXT_DEV_HANDLER_SYNC_PENDING_FREE,
-	EXT_DEV_HANDLER_SYNC_PENDING_DISABLE,
+	EXTERNAL_STATE_SYNC_OK,
+	EXTERNAL_STATE_SYNC_PENDING_CREATE,
+	EXTERNAL_STATE_SYNC_PENDING_RELOAD,
+	EXTERNAL_STATE_SYNC_PENDING_FREE,
 
 	// hotplug ops
-	EXT_DEV_HANDLER_SYNC_PENDING_ADD,
-	EXT_DEV_HANDLER_SYNC_PENDING_REMOVE,
-	EXT_DEV_HANDLER_SYNC_PENDING_PREPARE,
+	EXTERNAL_STATE_SYNC_PENDING_ADD,
+	EXTERNAL_STATE_SYNC_PENDING_REMOVE,
+	EXTERNAL_STATE_SYNC_PENDING_PREPARE,
 };
 
 // wrapper for ubus device type structs
 struct ubusdev_type {
 	struct device_type handler;
 
+	const char *ext_dev_handler_name;
 	uint32_t ubus_peer_id;
 	struct ubus_subscriber ubus_sub;
 	bool subscribed;
 
+	// for parsing device configs
 	struct uci_blob_param_list *config_params;
 	char *config_strbuf;
+
+	// for parsing 'dump info' replies
+	struct uci_blob_param_list *info_params;
+	char *info_strbuf;
+
+	// for parsing 'dump stats' replies
+	struct uci_blob_param_list *stats_params;
+	char *stats_strbuf;
 };
 
 // wrapper for device structs with bridge capability
@@ -75,7 +83,7 @@ struct ubusdev_bridge {
 	int n_present;
 	int n_failed;
 
-	enum ext_device_handler_sync_status sync_status;
+	enum external_sync_state sync;
 	// retry for tasks that need to be executed by external device handler
 	struct uloop_timeout retry;
 };
@@ -87,6 +95,8 @@ struct ubusdev_bridge_member {
 	bool present;
 	bool hotplug;
 	char *name;
+
+	enum external_sync_state sync;
 };
 
 enum {
@@ -148,19 +158,19 @@ static struct ubus_object_type ubusdev_ubus_object_type =
 /* find out the ubus ID of the peer to a given ubus device type wrapper
  */
 static int
-ubusdev_lookup_id(struct ubusdev_type *dtype_wrap)
+ubusdev_lookup_id(struct ubusdev_type *utype)
 {
 	int ret;
 
-	if (!dtype_wrap || !dtype_wrap->handler.name)
+	if (!utype || !utype->ext_dev_handler_name)
 		return 1;
 
-	ret = ubus_lookup_id(ubus_ctx, dtype_wrap->handler.name,
-		&dtype_wrap->ubus_peer_id);
+	ret = ubus_lookup_id(ubus_ctx, utype->ext_dev_handler_name,
+		&utype->ubus_peer_id);
 
 	if (ret) {
 		fprintf(stderr, "could not find ubus ID for object '%s'\n",
-			dtype_wrap->handler.name);
+			utype->ext_dev_handler_name);
 		return ret;
 	}
 
@@ -168,17 +178,17 @@ ubusdev_lookup_id(struct ubusdev_type *dtype_wrap)
 }
 
 static void
-ubusdev_bridge_set_sync_status(struct ubusdev_bridge *ubr,
-	enum ext_device_handler_sync_status status)
+ubusdev_bridge_set_sync(struct ubusdev_bridge *ubr,
+	enum external_sync_state status)
 {
-	ubr->sync_status = status;
+	ubr->sync = status;
 }
 
 static void
-ubusdev_bridge_set_timeout(enum ext_device_handler_sync_status status,
+ubusdev_bridge_set_timeout(enum external_sync_state status,
 	struct ubusdev_bridge *ubr, unsigned long ms)
 {
-	ubusdev_bridge_set_sync_status(ubr, status);
+	ubusdev_bridge_set_sync(ubr, status);
 	uloop_timeout_set(&ubr->retry, ms);
 }
 
@@ -198,53 +208,36 @@ ubusdev_bridge_enable_interface(struct ubusdev_bridge *ubr)
 	int ret;
 	struct ubusdev_type *utype;
 
-	if (ubr->active || ubr->sync_status == EXT_DEV_HANDLER_SYNC_PENDING_CREATE)
+	if (ubr->active)
 		return 0;
 
+	if (ubr->sync == EXTERNAL_STATE_SYNC_PENDING_CREATE)
+		return -1;
+
 	// tell external device handler to create bridge with stored config
-	ubusdev_bridge_set_sync_status(ubr, EXT_DEV_HANDLER_SYNC_PENDING_CREATE);
+	ubusdev_bridge_set_sync(ubr, EXTERNAL_STATE_SYNC_PENDING_CREATE);
 	utype = container_of(ubr->dev.type, struct ubusdev_type, handler);
 	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-		__ubusdev_methods[UBUSDEV_METHOD_CREATE], ubr->config);
+		__ubusdev_methods[UBUSDEV_METHOD_CREATE], ubr->config, NULL, NULL);
 
 	if (ret)
 		goto error;
 
 	// the ubus call was made successfully -> start notification timer
-	ubusdev_bridge_set_timeout(EXT_DEV_HANDLER_SYNC_PENDING_CREATE, ubr, 100);
+	ubusdev_bridge_set_timeout(EXTERNAL_STATE_SYNC_PENDING_CREATE, ubr, 100);
 	return -1;
 
 error:
 	ubusdev_invocation_error(ret, __ubusdev_methods[UBUSDEV_METHOD_CREATE],
-		NULL);
+		ubr->dev.ifname);
 	return ret;
 }
 
 static int
 ubusdev_bridge_disable_interface(struct ubusdev_bridge *ubr)
 {
-	int ret;
-	struct ubusdev_type *utype;
-
-	if (!ubr->active || ubr->sync_status == EXT_DEV_HANDLER_SYNC_PENDING_DISABLE)
-		return 0;
-
-	utype = container_of(ubr->dev.type, struct ubusdev_type, handler);
-	blob_buf_init(&blob_buffer, 0);
-	blobmsg_add_string(&blob_buffer, "bridge", ubr->dev.ifname);
-
-	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-		__ubusdev_methods[UBUSDEV_METHOD_FREE], blob_buffer.head);
-
-	if (ret)
-		goto error;
-
-	ubusdev_bridge_set_timeout(EXT_DEV_HANDLER_SYNC_PENDING_DISABLE, ubr, 100);
+	ubr->active = false;
 	return 0;
-
-error:
-	ubusdev_invocation_error(ret, __ubusdev_methods[UBUSDEV_METHOD_FREE], NULL);
-	return ret;
 }
 
 static int
@@ -262,18 +255,20 @@ ubusdev_hotplug_add(struct device *dev, struct device *member)
 	blobmsg_add_string(&blob_buffer, "member", member->ifname);
 
 	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-		__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_ADD], blob_buffer.head);
+		__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_ADD], blob_buffer.head, NULL,
+		NULL);
 
 	if (ret) {
 		ubusdev_invocation_error(ret,
-			__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_ADD], NULL);
-	} else {
-		// calling device_lock() ensures that the simple device created for a
-		// wireless interface is not freed too early by device_free_unused().
-		// (i.e. before the external device handler has signalled back
-		// successful device creation)
-		device_lock();
+			__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_ADD], member->ifname);
+		return ret;
 	}
+
+	// calling device_lock() ensures that the simple device created for a
+	// bridge member interface is not freed too early by device_free_unused().
+	// (i.e. before the external device handler has signalled back
+	// successful device creation)
+	device_lock();
 
 	return ret;
 }
@@ -309,17 +304,12 @@ ubusdev_hotplug_prepare(struct device *dev)
 	return 0;
 }
 
-static const struct device_hotplug_ops ubusdev_ops = {
-	.prepare = ubusdev_hotplug_prepare,
-	.add = ubusdev_hotplug_add,
-	.del = ubusdev_hotplug_del
-};
-
 static int
 ubusdev_bridge_enable_member(struct ubusdev_bridge_member *member)
 {
 	int ret;
 	struct ubusdev_bridge *ubr = member->parent_br;
+	struct ubusdev_type *utype;
 
 	if (!member->present)
 		return 0;
@@ -328,39 +318,102 @@ ubusdev_bridge_enable_member(struct ubusdev_bridge_member *member)
 	if (ret)
 		goto error;
 
-	if (ubr->sync_status == EXT_DEV_HANDLER_SYNC_OK) {
+	if (ubr->sync != EXTERNAL_STATE_SYNC_OK)
+		goto error;
 
-		ret = device_claim(&member->dev_usr);
-		if (ret < 0)
-			goto error;
+	ret = device_claim(&member->dev_usr);
+	if (ret < 0)
+		goto error;
 
-		device_set_present(&ubr->dev, true);
-		device_broadcast_event(&ubr->dev, DEV_EVENT_TOPO_CHANGE);
-	}
+	// don't make the ubus call if either
+	// 1) the member has been added via a hotplug call to 
+	//    'network.interface add_device' (i.e. member->hotplug == true)
+	// 2) the member has not been added via a call to
+	//    'network.interface add_device' AND its state is in sync with the
+	//     external device handler
+	if (member->hotplug)
+		return 0;
+	else if (member->sync != EXTERNAL_STATE_SYNC_PENDING_ADD)
+		return 0;
+
+	utype = container_of(ubr->dev.type, struct ubusdev_type, handler);
+	blob_buf_init(&blob_buffer, 0);
+	blobmsg_add_string(&blob_buffer, "bridge", ubr->dev.ifname);
+	blobmsg_add_string(&blob_buffer, "member", member->dev_usr.dev->ifname);
+
+	// abuse hotplug add as addif equivalent. Maybe we need a dedicated ubus
+	// method on the external handler for this sort of operation.
+	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
+		__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_ADD], blob_buffer.head, NULL,
+		NULL);
+
+	if (ret)
+		goto inv_error;
 
 	return 0;
+
+inv_error:
+	ubusdev_invocation_error(ret,
+		__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_ADD],
+		member->dev_usr.dev->ifname);
 
 error:
 	ubr->n_failed++;
 	member->present = false;
+	member->sync = EXTERNAL_STATE_SYNC_PENDING_ADD;
 	ubr->n_present--;
 	device_release(&member->dev_usr);
 
 	return ret;
 }
 
+/* Disable a bridge member.
+ * At the moment, hotplug remove is used to remove the member at the external
+ * device handler. If that clashes with future requirements, maybe we'll have to
+ * add methods for disabling members.
+ */
 static int
 ubusdev_bridge_disable_member(struct ubusdev_bridge_member *member)
 {
+	int ret;
 	struct ubusdev_bridge *ubr = member->parent_br;
+	struct ubusdev_type *utype;
 
 	if (!member->present)
 		return 0;
 
-	device_release(&member->dev_usr);
-	device_broadcast_event(&ubr->dev, DEV_EVENT_TOPO_CHANGE);
+	utype = container_of(ubr->dev.type, struct ubusdev_type, handler);
+	blob_buf_init(&blob_buffer, 0);
+	blobmsg_add_string(&blob_buffer, "bridge", ubr->dev.ifname);
+	blobmsg_add_string(&blob_buffer, "member", member->dev_usr.dev->ifname);
 
+	// abuse hotplug remove as delif equivalent. Maybe we need a dedicated ubus
+	// method on the external handler for this sort of operation.
+	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
+		__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_REMOVE], blob_buffer.head,
+		NULL, NULL);
+
+	if (ret)
+		goto error;
+
+	member->sync = EXTERNAL_STATE_SYNC_PENDING_REMOVE;
 	return 0;
+
+error:
+	ubusdev_invocation_error(ret,
+		__ubusdev_methods[UBUSDEV_METHOD_HOTPLUG_REMOVE],
+		member->dev_usr.dev->ifname);
+
+	return ret;
+}
+
+static void
+ubusdev_bridge_check_members(struct ubusdev_bridge *ubr)
+{
+	if (!ubr->n_failed)
+		return;
+
+	uloop_timeout_set(&ubr->retry, 100);
 }
 
 static int
@@ -390,6 +443,8 @@ ubusdev_bridge_set_up(struct ubusdev_bridge *ubr)
 	ubr->n_failed = 0;
 	vlist_for_each_element(&ubr->members, member, node)
 		ubusdev_bridge_enable_member(member);
+	ubusdev_bridge_check_members(ubr);
+
 
 	if (!ubr->force_active && !ubr->n_present) {
 		// initialization of all member interfaces failed
@@ -494,9 +549,18 @@ ubusdev_bridge_create_member(struct ubusdev_bridge *ubr, struct device *dev,
 	// created pointer will be freed in case the bridge member
 	// already existed
 	member = vlist_find(&ubr->members, dev->ifname, member, node);
-	if (hotplug && member)
-		member->node.version = -1;
+	if (!member)
+		return NULL;
 
+	// hotplug devices have been added to the bridge already
+	if (hotplug) {
+		member->sync = EXTERNAL_STATE_SYNC_OK;
+		member->node.version = -1;
+		return member;
+	}
+
+	// non-hotplug devices need creation at the external device handler
+	member->sync = EXTERNAL_STATE_SYNC_PENDING_ADD;
 	return member;
 }
 
@@ -537,7 +601,7 @@ ubusdev_bridge_free_member(struct ubusdev_bridge_member *member)
 	free(member);
 }
 
-/* Called whenever a node is inserted or removed into the members vlist of
+/* Called whenever a node is inserted into or removed from the members vlist of
  * ubusdev_bridge structs.
  */
 static void
@@ -634,7 +698,7 @@ ubusdev_bridge_reload(struct device *dev, struct blob_attr *config)
 			struct ubusdev_type, handler);
 
 		inv_ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-			__ubusdev_methods[UBUSDEV_METHOD_RELOAD], config);
+			__ubusdev_methods[UBUSDEV_METHOD_RELOAD], config, NULL, NULL);
 
 		if (inv_ret) {
 			fprintf(stderr, "Failed to finish config reload for device '%s'."
@@ -644,7 +708,7 @@ ubusdev_bridge_reload(struct device *dev, struct blob_attr *config)
 		}
 
 		// schedule retry
-		ubusdev_bridge_set_timeout(EXT_DEV_HANDLER_SYNC_PENDING_RELOAD,
+		ubusdev_bridge_set_timeout(EXTERNAL_STATE_SYNC_PENDING_RELOAD,
 			ubr, 100);
 
 		free(ubr->config);
@@ -678,6 +742,12 @@ ubusdev_bridge_retry_enable_members(struct ubusdev_bridge *ubr)
 
 		if (!cur->dev_usr.dev->present)
 			continue;
+		}
+
+		// don't make the call to the external device handler if
+		// state is sync'ed
+		if (cur->sync == EXTERNAL_STATE_SYNC_OK)
+			continue;
 
 		cur->present = true;
 		ubr->n_present++;
@@ -701,36 +771,38 @@ ubusdev_bridge_timeout_cb(struct uloop_timeout *timeout)
 	// retry the call.
 	// If the external device handler has notified us of success, however, we
 	// re-initiate the setup of the bridge members for active bridges.
-	switch (ubr->sync_status) {
-		case EXT_DEV_HANDLER_SYNC_PENDING_CREATE:
+	switch (ubr->sync) {
+		case EXTERNAL_STATE_SYNC_PENDING_CREATE:
 			method = __ubusdev_methods[UBUSDEV_METHOD_CREATE];
 			attr = ubr->config;
 			break;
-		case EXT_DEV_HANDLER_SYNC_PENDING_RELOAD:
+		case EXTERNAL_STATE_SYNC_PENDING_RELOAD:
 			method = __ubusdev_methods[UBUSDEV_METHOD_RELOAD];
 			attr = ubr->config;
 			break;
-		case EXT_DEV_HANDLER_SYNC_PENDING_FREE:
-		case EXT_DEV_HANDLER_SYNC_PENDING_DISABLE:
+		case EXTERNAL_STATE_SYNC_PENDING_FREE:
 			method = __ubusdev_methods[UBUSDEV_METHOD_FREE];
 			blob_buf_init(&blob_buffer, 0);
 			blobmsg_add_string(&blob_buffer, "bridge", ubr->dev.ifname);
 			attr = blob_buffer.head;
 			break;
-		case EXT_DEV_HANDLER_SYNC_OK:
-			if (ubr->active)
-				ubusdev_bridge_retry_enable_members(ubr);
+		case EXTERNAL_STATE_SYNC_OK:
+			if (!ubr->active)
+				return;
+
+			ubusdev_bridge_retry_enable_members(ubr);
 			return;
 		default:
 			return;
 	}
 
-	ret = netifd_ubusdev_invoke(ubr->utype->ubus_peer_id, method, attr);
+	ret = netifd_ubusdev_invoke(ubr->utype->ubus_peer_id, method, attr, NULL,
+		NULL);
 
 	if (ret)
 		ubusdev_invocation_error(ret, method, ubr->dev.ifname);
 
-	ubusdev_bridge_set_timeout(ubr->sync_status, ubr, 100);
+	ubusdev_bridge_set_timeout(ubr->sync, ubr, 100);
 }
 
 static struct device*
@@ -759,7 +831,7 @@ _ubusdev_create(const char *name, struct device_type *type,
 
 	// let the external device handler set up the device
 	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-		__ubusdev_methods[UBUSDEV_METHOD_CREATE], config);
+		__ubusdev_methods[UBUSDEV_METHOD_CREATE], config, NULL, NULL);
 	if (ret)
 		goto inv_error;
 
@@ -779,6 +851,12 @@ error:
 		ubus_strerror(ret));
 	return NULL;
 }
+
+static const struct device_hotplug_ops ubusdev_ops = {
+	.prepare = ubusdev_hotplug_prepare,
+	.add = ubusdev_hotplug_add,
+	.del = ubusdev_hotplug_del
+};
 
 /* Initialize a bridge device stub in netifd.
  */
@@ -836,12 +914,12 @@ ubusdev_bridge_free(struct ubusdev_bridge *ubr)
 	utype = container_of(ubr->dev.type, struct ubusdev_type, handler);
 
 	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-		__ubusdev_methods[UBUSDEV_METHOD_FREE], ubr->config);
+		__ubusdev_methods[UBUSDEV_METHOD_FREE], ubr->config, NULL, NULL);
 
 	if (ret)
 		goto error;
 
-	ubusdev_bridge_set_timeout(EXT_DEV_HANDLER_SYNC_PENDING_FREE, ubr, 100);
+	ubusdev_bridge_set_timeout(EXTERNAL_STATE_SYNC_PENDING_FREE, ubr, 100);
 
 	return;
 
@@ -872,7 +950,7 @@ ubusdev_free(struct device *dev)
 	blobmsg_add_string(&blob_buffer, "name", dev->ifname);
 
 	ret = netifd_ubusdev_invoke(utype->ubus_peer_id,
-		__ubusdev_methods[UBUSDEV_METHOD_FREE], blob_buffer.head);
+		__ubusdev_methods[UBUSDEV_METHOD_FREE], blob_buffer.head, NULL, NULL);
 
 	if (ret) {
 		ubusdev_invocation_error(ret, __ubusdev_methods[UBUSDEV_METHOD_FREE],
@@ -906,7 +984,9 @@ _ubusdev_bridge_config_init(struct device *dev)
 }
 
 /* Set a device present. If the device is a bridge type device, allocate
- * state for the mmebers and set them up as well.
+ * state for the mmebers. The create calls for the members will not be issued
+ * immediately, though. That is done when the bridge is brought up
+ * (ubusdev_bridge_enable_interface).
  */
 static void
 ubusdev_config_init(struct device *dev)
@@ -915,6 +995,142 @@ ubusdev_config_init(struct device *dev)
 		_ubusdev_bridge_config_init(dev);
 	else
 		device_set_present(dev, true);
+}
+
+static void
+ubusdev_info_buf_add_array(struct blob_attr *array, const char *name,
+	struct blob_buf *buf)
+{
+	int rem;
+	struct blob_attr *cur;
+	void *list = blobmsg_open_array(buf, name);
+
+	blobmsg_for_each_attr(cur, array, rem)
+		blobmsg_add_string(buf, NULL, blobmsg_get_string(cur));
+	blobmsg_close_array(buf, list);
+}
+
+struct ubusdev_dump_data {
+	const struct device *dev;
+	struct blob_buf *buf;
+};
+
+static void
+ubusdev_info_data_cb(struct ubus_request *req, int type, struct blob_attr
+		*reply)
+{
+	struct ubusdev_dump_data *data = req->priv;
+	struct ubusdev_type *utype = container_of(data->dev->type, struct
+			ubusdev_type, handler);
+	const struct blobmsg_policy *info_policy = utype->info_params->params;
+	int n_params = utype->info_params->n_params;
+	struct blob_buf *buf = data->buf;
+
+	struct blob_attr *tb[n_params];
+
+	blobmsg_parse(info_policy, n_params, tb, blobmsg_data(reply),
+			blobmsg_len(reply));
+
+	for (int i = 0; i < n_params; i++) {
+		if (!tb[i])
+			continue;
+
+		switch (info_policy[i].type) {
+			case BLOBMSG_TYPE_STRING:
+				blobmsg_add_string(buf, info_policy[i].name,
+					blobmsg_get_string(tb[i]));
+				break;
+			case BLOBMSG_TYPE_ARRAY:
+				ubusdev_info_buf_add_array(tb[i], info_policy[i].name, buf);
+				break;
+			default:
+				continue;
+		}
+	}
+}
+
+static void
+ubusdev_dump_info(struct device *dev, struct blob_buf *buf)
+{
+	struct ubusdev_type *utype = container_of(dev->type, struct ubusdev_type,
+			handler);
+	struct ubusdev_dump_data *data;
+	data = malloc(sizeof(struct ubusdev_dump_data));
+	if (!data)
+		return;
+
+	data->dev = dev;
+	data->buf = buf;
+
+	blob_buf_init(&blob_buffer, 0);
+	if (dev->type->bridge_capability)
+		blobmsg_add_string(&blob_buffer, "bridge", dev->ifname);
+	else
+		blobmsg_add_string(&blob_buffer, "device", dev->ifname);
+
+	netifd_ubusdev_invoke(utype->ubus_peer_id,
+		__ubusdev_methods[UBUSDEV_METHOD_DUMP_INFO], blob_buffer.head,
+		ubusdev_info_data_cb, data);
+
+	system_if_dump_info(dev, buf);
+}
+
+static void
+ubusdev_stats_data_cb(struct ubus_request *req, int type, struct blob_attr
+*reply)
+{
+	struct ubusdev_dump_data *data = req->priv;
+	struct ubusdev_type *utype = container_of(data->dev->type, struct
+			ubusdev_type, handler);
+	const struct blobmsg_policy *stats_policy = utype->stats_params->params;
+	int n_params = utype->stats_params->n_params;
+	struct blob_buf *buf = data->buf;
+
+	struct blob_attr *tb[n_params];
+
+	blobmsg_parse(stats_policy, n_params, tb, blobmsg_data(reply),
+			blobmsg_len(reply));
+
+	for (int i = 0; i < n_params; i++) {
+		if (!tb[i])
+			continue;
+
+		switch (stats_policy[i].type) {
+			case BLOBMSG_TYPE_STRING:
+				blobmsg_add_string(buf, stats_policy[i].name,
+						blobmsg_get_string(tb[i]));
+				break;
+			case BLOBMSG_TYPE_ARRAY:
+				ubusdev_info_buf_add_array(tb[i], stats_policy[i].name, buf);
+				break;
+			default:
+				continue;
+		}
+	}
+}
+
+static void
+ubusdev_dump_stats(struct device *dev, struct blob_buf *buf)
+{
+	struct ubusdev_type *utype = container_of(dev->type, struct ubusdev_type,
+			handler);
+	struct ubusdev_dump_data *data;
+	data = malloc(sizeof(struct ubusdev_dump_data));
+	if (!data)
+		return;
+
+	data->dev = dev;
+	data->buf = buf;
+
+	blob_buf_init(&blob_buffer, 0);
+	if (dev->type->bridge_capability)
+		blobmsg_add_string(&blob_buffer, "bridge", dev->ifname);
+	else
+		blobmsg_add_string(&blob_buffer, "device", dev->ifname);
+
+	netifd_ubusdev_invoke(utype->ubus_peer_id,
+			__ubusdev_methods[UBUSDEV_METHOD_DUMP_STATS], blob_buffer.head,
+			ubusdev_stats_data_cb, data);
 }
 
 /* Called when external device handler signals successful device creation.
@@ -937,7 +1153,7 @@ ubusdev_handle_create_notify(const char **devices, int n_devices)
 		if (dev->type->bridge_capability) {
 			ubr = container_of(dev, struct ubusdev_bridge, dev);
 
-			if (ubr->sync_status != EXT_DEV_HANDLER_SYNC_PENDING_CREATE)
+			if (ubr->sync != EXTERNAL_STATE_SYNC_PENDING_CREATE)
 				return 0;
 
 			// call preserved set_state callback to bring bridge up
@@ -948,7 +1164,7 @@ ubusdev_handle_create_notify(const char **devices, int n_devices)
 			}
 
 			ubr->active = true;
-			ubusdev_bridge_set_sync_status(ubr, EXT_DEV_HANDLER_SYNC_OK);
+			ubusdev_bridge_set_sync(ubr, EXTERNAL_STATE_SYNC_OK);
 		}
 	}
 
@@ -982,10 +1198,9 @@ ubusdev_handle_delete_notify(const char **devices, int n_dev)
 			// do not delete device that is not marked for deletion.
 			// This means that bridges merely get 'disabled' while their
 			// devices and configs are still available.
-			if (ubr->sync_status != EXT_DEV_HANDLER_SYNC_PENDING_FREE) {
+			if (ubr->sync != EXTERNAL_STATE_SYNC_PENDING_FREE) {
 				ubr->active = false;
-
-				ubusdev_bridge_set_sync_status(ubr, EXT_DEV_HANDLER_SYNC_OK);
+				ubusdev_bridge_set_sync(ubr, EXTERNAL_STATE_SYNC_OK);
 				continue;
 			}
 
@@ -1004,12 +1219,13 @@ ubusdev_handle_delete_notify(const char **devices, int n_dev)
 
 /* Called as part of the subscription to the external device handler's
  * ubus object.
- * Link member to bridge.
+ * TODO description (distinguish real hotplug and add-port)
  */
 static int
 ubusdev_handle_hotplug_add_notify(const char **devices, int n_dev)
 {
-	struct device *bridge, *member;
+	struct device *bridge, *member_dev;
+	struct ubusdev_bridge_member *member;
 	struct ubusdev_bridge *ubr;
 
 	if (n_dev != 2)
@@ -1017,22 +1233,61 @@ ubusdev_handle_hotplug_add_notify(const char **devices, int n_dev)
 
 	bridge = device_get(devices[0], 0);
 	if (!bridge)
-		goto error;
+		return UBUS_STATUS_INVALID_ARGUMENT;
 
-	member = device_get(devices[1], 0);
-	if (!member)
-		goto error;
+	member_dev = device_get(devices[1], 0);
+	if (!member_dev)
+		return UBUS_STATUS_NOT_FOUND;
 
 	ubr = container_of(bridge, struct ubusdev_bridge, dev);
-	ubusdev_bridge_create_member(ubr, member, true);
 
-	device_unlock();
+	// If the member is already present in the members list of the bridge,
+	// it means that this notification is happening because the member has
+	// not been added via hotplug add. This member has to be activated rather
+	// than created.
+	// Correspondingly, if the member does not exist in the bridge, create it
+	// and unlock the devices list for device_free_unused(), again.
+	member = vlist_find(&ubr->members, devices[1], member, node);
+	if (!member) {
+		ubusdev_bridge_create_member(ubr, member_dev, true);
+		device_unlock();
+		return 0;
+	}
+
+	member->sync = EXTERNAL_STATE_SYNC_OK;
+
+	device_set_present(&ubr->dev, true);
+	device_broadcast_event(&ubr->dev, DEV_EVENT_TOPO_CHANGE);
 
 	return 0;
+}
 
-error:
-	device_unlock();
-	return UBUS_STATUS_NOT_FOUND;
+static int
+ubusdev_handle_hotplug_remove_notify(const char **devices, int n_dev)
+{
+	struct device *bridge;
+	struct ubusdev_bridge_member *member;
+	struct ubusdev_bridge *ubr;
+
+	if (n_dev != 2)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	bridge = device_get(devices[0], 0);
+	if (!bridge)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	ubr = container_of(bridge, struct ubusdev_bridge, dev);
+
+	member = vlist_find(&ubr->members, devices[1], member, node);
+	if (!member)
+		return UBUS_STATUS_INVALID_ARGUMENT;
+
+	member->sync = EXTERNAL_STATE_SYNC_OK;
+
+	device_release(&member->dev_usr);
+	device_broadcast_event(&ubr->dev, DEV_EVENT_TOPO_CHANGE);
+
+	return 0;
 }
 
 /* Called as part of the subscription to the external device handler's
@@ -1073,7 +1328,7 @@ ubusdev_handle_notify(struct ubus_context *ctx, struct ubus_object *obj,
 	}
 
 	blobmsg_for_each_attr(cur, tb[0], rem)
- 		devices[i++] = blobmsg_get_string(cur);
+		devices[i++] = blobmsg_get_string(cur);
 
 	if (!strcmp(type, "create"))
 		ret = ubusdev_handle_create_notify(devices, cnt);
@@ -1083,6 +1338,8 @@ ubusdev_handle_notify(struct ubus_context *ctx, struct ubus_object *obj,
 		ret = ubusdev_handle_delete_notify(devices, cnt);
 	else if (!strcmp(type, "add"))
 		ret = ubusdev_handle_hotplug_add_notify(devices, cnt);
+	else if (!strcmp(type, "remove"))
+		ret = ubusdev_handle_hotplug_remove_notify(devices, cnt);
 
 	free(devices);
 
@@ -1096,7 +1353,7 @@ done:
 }
 
 static void
-ubusdev_handler_ext_handler_remove(struct ubus_context *ctx,
+ubusdev_ext_handler_remove_cb(struct ubus_context *ctx,
 	struct ubus_subscriber *obj, uint32_t id)
 {
 	struct ubusdev_type *utype;
@@ -1112,30 +1369,41 @@ ubusdev_handler_ext_handler_remove(struct ubus_context *ctx,
  */
 static void
 ubusdev_add_devtype(const char *cfg_file, const char *tname,
-	bool bridge_capability, const char *br_prefix, json_object *obj)
+	const char *ubus_name, bool bridge_capability,
+	const char *br_prefix, json_object *obj)
 {
 	struct ubusdev_type *utype;
 	struct device_type *devtype;
 	json_object *cfg;
-	char *ubus_obj_name, *devtype_name, *name_prefix;
-	struct uci_blob_param_list *config_params;
+	char *ubus_obj_name, *devtype_name, *ext_dev_handler_name, *name_prefix;
+	struct uci_blob_param_list *config_params, *info_params, *stats_params;
 	int ret;
 
 	utype = calloc_a(sizeof(*utype),
-		&ubus_obj_name, strlen(UBUSDEV_UBUSOBJ_NAME_PREFIX) + strlen(tname) + 1,
+		&ubus_obj_name, strlen(UBUSDEV_UBUSOBJ_NAME_PREFIX) +
+			strlen(ubus_name) + 1,
 		&devtype_name, strlen(tname) + 1,
-		&config_params, sizeof(struct uci_blob_param_list));
+		&ext_dev_handler_name, strlen(ubus_name) + 1,
+		&config_params, sizeof(struct uci_blob_param_list),
+		&info_params, sizeof(struct uci_blob_param_list),
+		&stats_params, sizeof(struct uci_blob_param_list));
 	if (!utype)
 		return;
 
 	utype->config_params = config_params;
+	utype->info_params = info_params;
+	utype->ext_dev_handler_name = strcpy(ext_dev_handler_name, ubus_name);
 
 	devtype = &utype->handler;
 	devtype->name = strcpy(devtype_name, tname);
+	
 	devtype->create = ubusdev_create;
 	devtype->free = ubusdev_free;
 	devtype->config_init = ubusdev_config_init;
 	devtype->reload = ubusdev_reload;
+	devtype->dump_info = ubusdev_dump_info;
+	devtype->dump_stats = ubusdev_dump_stats;
+
 	devtype->bridge_capability = bridge_capability;
 	devtype->config_params = utype->config_params;
 
@@ -1149,7 +1417,7 @@ ubusdev_add_devtype(const char *cfg_file, const char *tname,
 	}
 
 	// prepare and register ubus object
-	sprintf(ubus_obj_name, UBUSDEV_UBUSOBJ_NAME_PREFIX "%s", tname);
+	sprintf(ubus_obj_name, UBUSDEV_UBUSOBJ_NAME_PREFIX "%s", ubus_name);
 	utype->ubus_sub.obj.name = ubus_obj_name;
 	utype->ubus_sub.obj.type = &ubusdev_ubus_object_type;
 	utype->ubus_sub.obj.n_methods = ARRAY_SIZE(ubusdev_object_methods);
@@ -1164,7 +1432,7 @@ ubusdev_add_devtype(const char *cfg_file, const char *tname,
 
 	// prepare subscription and subscribe to peer object
 	utype->ubus_sub.cb = ubusdev_handle_notify;
-	utype->ubus_sub.remove_cb = ubusdev_handler_ext_handler_remove;
+	utype->ubus_sub.remove_cb = ubusdev_ext_handler_remove_cb;
 	ret = ubus_subscribe(ubus_ctx, &utype->ubus_sub,
 		utype->ubus_peer_id);
 	if (ret)
@@ -1182,6 +1450,32 @@ ubusdev_add_devtype(const char *cfg_file, const char *tname,
 	if (!utype->config_strbuf)
 		goto error;
 
+	// Parse and store info dump format description.
+	// If none is given, do not set 'dump_info' handler
+	cfg = json_get_field(obj, "info", json_type_array);
+	if (!cfg) {
+		devtype->dump_info = NULL;
+	} else {
+		utype->info_strbuf = netifd_handler_parse_config(utype->info_params,
+				cfg);
+
+		if (!utype->info_strbuf)
+			devtype->dump_info = NULL;
+	}
+
+	// Parse and store statistics dump format description.
+	// If none is present, do not set 'dump_statistics' handler.
+	cfg = json_get_field(obj, "stats", json_type_array);
+	if (!cfg) {
+		devtype->dump_stats = NULL;
+	} else {
+		utype->stats_strbuf = netifd_handler_parse_config(utype->stats_params,
+				cfg);
+
+		if (!utype->stats_strbuf)
+			devtype->dump_stats = NULL;
+	}
+
 	// add device type to device type list
 	ret = device_type_add(devtype);
 	if (ret)
@@ -1191,6 +1485,8 @@ ubusdev_add_devtype(const char *cfg_file, const char *tname,
 
 config_error:
 	free(utype->config_strbuf);
+	free(utype->info_strbuf);
+	free(utype->stats_strbuf);
 
 error:
 	fprintf(stderr, "Failed to create device handler for device"

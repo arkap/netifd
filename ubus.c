@@ -1221,15 +1221,10 @@ int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob
 	return 0;
 }*/
 
-static void ubusdev_data_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg,
+	ubus_data_handler_t data_cb, void *data)
 {
-	// TODO: parse message in case of error and clean up
-	return;
-}
-
-int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg)
-{
-	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, ubusdev_data_cb, NULL, 3000);
+	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, data_cb, data, 3000);
 }
 
 void netifd_add_object(struct ubus_object *obj)
