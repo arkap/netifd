@@ -195,41 +195,7 @@ netifd_parse_ubusdev_handler(const char *path_to_file, ubusdev_cfg_parse_cb cb)
 
 	if (tok)
 		json_tokener_free(tok);
-/*
-	// read file content stripping out newlines
-	while ((c = fgetc(file)) != EOF) {
-		if (c == '\n')
-			continue;
 
-		buf[len++] = c;
-
-		// grow buffer (exponentially), if needed
-		if (len == ARRAY_SIZE(buf) - 1) {
-			char *tmp = _grow_buffer(buf, len, len * 2);
-			if (!tmp) {
-				fprintf(stderr,
-					"Error allocating memory for parsing of file '%s'\n",
-					path_to_file);
-				goto free_buf;
-			}
-
-			free(buf);
-			buf = tmp;
-		}
-	}
-	buf[len] = '\0';
-
-	obj = json_tokener_parse_ex(tok, buf, len);
-
-	if (!is_error(obj)) {
-		netifd_init_ubusdev_handler(path_to_file, obj, cb);
-		json_object_put(obj);
-		json_tokener_free(tok);
-	}
-
-free_buf:
-	free(buf);
-*/
 	fclose(file);
 }
 
