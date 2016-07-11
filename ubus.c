@@ -1221,8 +1221,8 @@ int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob
 	return 0;
 }*/
 
-int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg,
-	ubus_data_handler_t data_cb, void *data)
+int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method,
+	struct blob_attr *msg, ubus_data_handler_t data_cb, void *data)
 {
 	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, data_cb, data, 3000);
 }
@@ -1232,7 +1232,8 @@ void netifd_add_object(struct ubus_object *obj)
 	int ret = ubus_add_object(ubus_ctx, obj);
 
 	if (ret != 0)
-		fprintf(stderr, "Failed to publish object '%s': %s\n", obj->name, ubus_strerror(ret));
+		fprintf(stderr, "Failed to publish object '%s': %s\n", obj->name,
+				ubus_strerror(ret));
 }
 
 int
