@@ -1197,37 +1197,44 @@ static struct ubus_object wireless_object = {
 	.n_methods = ARRAY_SIZE(wireless_object_methods),
 };
 
-/*
-static void ubusdev_req_complete_cb(struct ubus_request *req, int ret)
+
+static void
+ubusdev_req_complete_cb(struct ubus_request *req, int ret)
 {
 	// TODO
 	return;
 }
 
-int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method, struct blob_attr *msg)
+int
+netifd_ubusdev_invoke_async(uint32_t dest_ubus_id, const char *method,
+	struct blob_attr *msg, ubus_data_handler_t data_cb, void *data)
 {
 	int ret;
 	struct ubus_request *req = calloc(1, sizeof(struct ubus_request));
 	if (!req)
 		return -ENOMEM;
 
-	req->data_cb = ubusdev_data_cb;
+	req->data_cb = data_cb;
 	req->complete_cb = ubusdev_req_complete_cb;
+	req->priv = data;
 
 	ret = ubus_invoke_async(ubus_ctx, dest_ubus_id, method, msg, req);
 	if (ret)
 		return ret;
+
 	ubus_complete_request_async(ubus_ctx, req);
 	return 0;
-}*/
+}
 
-int netifd_ubusdev_invoke(uint32_t dest_ubus_id, const char *method,
-	struct blob_attr *msg, ubus_data_handler_t data_cb, void *data)
+int
+ netifd_ubusdev_invoke_sync(uint32_t dest_ubus_id, const char *method,
+		struct blob_attr *msg, ubus_data_handler_t data_cb, void *data)
 {
 	return ubus_invoke(ubus_ctx, dest_ubus_id, method, msg, data_cb, data, 3000);
 }
 
-void netifd_add_object(struct ubus_object *obj)
+void
+netifd_add_object(struct ubus_object *obj)
 {
 	int ret = ubus_add_object(ubus_ctx, obj);
 
