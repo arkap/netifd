@@ -1626,8 +1626,8 @@ ubusdev_ext_handler_remove_cb(struct ubus_context *ctx,
 	utype = container_of(obj, struct ubusdev_type, ubus_sub);
 
 	netifd_log_message(L_NOTICE, "%s: connection to external device handler at "
-		"'%s' (ID: %08x) lost. Waiting for it to re-appear.\n", utype->handler
-		.name, id, utype->ext_dev_handler_name);
+		"'%s' lost. Waiting for it to re-appear.\n", utype->handler.name,
+		utype->ext_dev_handler_name);
 
 	utype->ubus_peer_id = 0;
 	utype->subscribed = false;
