@@ -18,16 +18,16 @@ extern struct ubus_context *ubus_ctx;
 
 int netifd_ubus_init(const char *path);
 void netifd_ubus_done(void);
-void netifd_add_object(struct ubus_object *obj);
 
 /* asynchronous call to external device handler
  */
-int netifd_ubusdev_invoke_async(uint32_t dest_ubus_id, const char *method,
-	struct blob_attr *msg, ubus_data_handler_t data_cb, void *data);
+int netifd_ubusdev_invoke_async(struct ubus_request *req, uint32_t dest_ubus_id,
+	const char *method, struct blob_attr *msg, ubus_data_handler_t data_cb,
+	ubus_complete_handler_t complete_cb, void *data);
 
 /* Synchronous call to external device handler. Used for example for
  * 'dump_info' and "dump_stats' calls where information has to be gathered
- * from the external device handler prior to dumping the buffer to the output
+ * from the external device handler prior to outputting the buffer.
  */
 int netifd_ubusdev_invoke_sync(uint32_t dest_ubus_id, const char *method,
 	struct blob_attr *msg, ubus_data_handler_t data_cb, void *data);

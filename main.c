@@ -325,8 +325,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	ubusdev_init();
 	proto_shell_init();
+	ubusdev_init();
 	wireless_init();
 
 	if (system_init()) {
