@@ -374,7 +374,7 @@ ubusdev_bridge_disable_interface(struct ubusdev_bridge *ubr)
 	int ret;
 
 	blob_buf_init(&blob_buffer, 0);
-	blobmsg_add_string(&blob_buffer, "bridge", ubr->udev.dev.ifname);
+	blobmsg_add_string(&blob_buffer, "name", ubr->udev.dev.ifname);
 
 	ret = netifd_ubusdev_invoke_async(&ubr->udev.req,
 		ubr->udev.utype->ubus_peer_id, __ubusdev_methods[UBUSDEV_METHOD_FREE],
@@ -1013,7 +1013,7 @@ ubusdev_timeout_cb(struct uloop_timeout *timeout)
 		case STATE_PENDING_FREE:
 			method = __ubusdev_methods[UBUSDEV_METHOD_FREE];
 			blob_buf_init(&blob_buffer, 0);
-			blobmsg_add_string(&blob_buffer, "bridge", udev->dev.ifname);
+			blobmsg_add_string(&blob_buffer, "name", udev->dev.ifname);
 			attr = blob_buffer.head;
 			break;
 		default:
@@ -1065,7 +1065,7 @@ ubusdev_bridge_timeout_cb(struct uloop_timeout *timeout)
 		case STATE_PENDING_FREE:
 			method = __ubusdev_methods[UBUSDEV_METHOD_FREE];
 			blob_buf_init(&blob_buffer, 0);
-			blobmsg_add_string(&blob_buffer, "bridge", ubr->udev.dev.ifname);
+			blobmsg_add_string(&blob_buffer, "name", ubr->udev.dev.ifname);
 			attr = blob_buffer.head;
 			break;
 		case STATE_PENDING_PREPARE:
@@ -1440,10 +1440,7 @@ ubusdev_dump_info(struct device *dev, struct blob_buf *buf)
 	data->buf = buf;
 
 	blob_buf_init(&blob_buffer, 0);
-	if (dev->type->bridge_capability)
-		blobmsg_add_string(&blob_buffer, "bridge", dev->ifname);
-	else
-		blobmsg_add_string(&blob_buffer, "device", dev->ifname);
+	blobmsg_add_string(&blob_buffer, "name", dev->ifname);
 
 	netifd_ubusdev_invoke_sync(utype->ubus_peer_id,
 		__ubusdev_methods[UBUSDEV_METHOD_DUMP_INFO], blob_buffer.head,
@@ -1491,10 +1488,7 @@ ubusdev_dump_stats(struct device *dev, struct blob_buf *buf)
 	data->buf = buf;
 
 	blob_buf_init(&blob_buffer, 0);
-	if (dev->type->bridge_capability)
-		blobmsg_add_string(&blob_buffer, "bridge", dev->ifname);
-	else
-		blobmsg_add_string(&blob_buffer, "device", dev->ifname);
+	blobmsg_add_string(&blob_buffer, "name", dev->ifname);
 
 	netifd_ubusdev_invoke_sync(utype->ubus_peer_id,
 		__ubusdev_methods[UBUSDEV_METHOD_DUMP_STATS], blob_buffer.head,
